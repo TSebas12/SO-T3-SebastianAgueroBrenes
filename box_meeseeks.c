@@ -1,7 +1,7 @@
 /* ============================================================================
  * Archivo      : box_meeseeks.c
  * Curso        : Sistemas Operativos - Tarea #3 Mr. Meeseeks
- * Autor        : [SuNombreCompleto] - [Carnet]
+ * Autor        : Sebastián Agüero Brenes - 2024108187
  * Lenguaje     : C sobre Linux (gcc -pthread -lm)
  * Compilar     : gcc -Wall -Wextra -O2 -o box_meeseeks box_meeseeks.c -pthread -lm
  * Uso          : ./box_meeseeks [timeout_caos_segundos]
@@ -31,8 +31,8 @@
  *                  | 2. lee solicitud por pipe     |
  *                  | 3. segun tipo: A/B/C          |
  *                  | 4a. A: sleep(sim), tira dado, |
- *                  |     si dificil -> crear_hijos |
- *                  |     (2 o 5, N+1, aging)       |
+  *                  |     si dificil -> crear_hijos |
+  *                  |     (2 o 5, N+1, aging, sol por pipe) |
  *                  | 4b. B: eval_aritmetica()      |
  *                  | 4c. C: fork+execvp+wait       |
  *                  | 5. escribe Resultado por pipe |
@@ -58,7 +58,7 @@
  *   2. Tope MAX_NIVEL=6 y MAX_MESEEKS_POR_TAREA=60. Al llegar, se aborta
  *      la rama y se reporta fracaso sin mas forks.
  *   3. Aging NO aplica a d=0 (se queda en 0) para que no se "lave" a 100.
- *   4. Timeout por tarea (limite interno) + timeout global caos planetario.
+ *   4. Timeout global caos planetario (configurable argv[1], default 300 s).
  *   5. Expansion limitada: 0-45 -> 5 hijos, 45-85 -> 2 hijos, 85-100 -> 0.
  *   Todo documentado tambien en el informe PDF.
  *
@@ -94,6 +94,23 @@
 #include <math.h>
 #include <ctype.h>
 #include <fcntl.h>
+
+/* ----------------------------- Colores ------------------------------ */
+/* Colores ANSI solo si stdout es terminal (asi los .txt de corridas quedan limpios). */
+#define C_RST   "\033[0m"
+#define C_BOLD  "\033[1m"
+#define C_DIM   "\033[2m"
+#define C_CYAN  "\033[36m"
+#define C_YEL   "\033[33m"
+#define C_GRN   "\033[32m"
+#define C_RED   "\033[31m"
+#define C_MAG   "\033[35m"
+static int usa_color(void)
+{
+    static int init = -1;
+    if (init < 0) init = isatty(STDOUT_FILENO) ? 1 : 0;
+    return init;
+}
 
 /* ----------------------------- Configuracion -------------------------- */
 #define MAX_TEXTO            512
@@ -165,6 +182,7 @@ static int    detectar_tipo(const char *s);
 static const char *nombre_tipo(int t);
 static void   mensaje_box(const char *msg);
 static void   mensaje_meeseeks(const char *msg);
+static void   linea_sep(void);
 static void   manejador_caos(int sig);
 static void   manejador_meeseeks_term(int sig);
 static float  pedir_dificultad(void);
@@ -255,14 +273,30 @@ static const char *nombre_tipo(int t)
 
 static void mensaje_box(const char *msg)
 {
-    printf("[BOX pid=%d] %s\n", (int)getpid(), msg);
+    if (usa_color())
+        printf(C_BOLD C_CYAN "[BOX pid=%d]" C_RST " %s\n", (int)getpid(), msg);
+    else
+        printf("[BOX pid=%d] %s\n", (int)getpid(), msg);
     fflush(stdout);
 }
 
 static void mensaje_meeseeks(const char *msg)
 {
-    printf("[Meeseeks pid=%d ppid=%d N=%d i=%d] %s\n",
-           (int)getpid(), (int)getppid(), g_mi_N, g_mi_i, msg);
+    if (usa_color())
+        printf(C_BOLD C_YEL "[MEEKS N=%d i=%d pid=%d ppid=%d]" C_RST " %s\n",
+               g_mi_N, g_mi_i, (int)getpid(), (int)getppid(), msg);
+    else
+        printf("[Meeseeks pid=%d ppid=%d N=%d i=%d] %s\n",
+               (int)getpid(), (int)getppid(), g_mi_N, g_mi_i, msg);
+    fflush(stdout);
+}
+
+static void linea_sep(void)
+{
+    if (usa_color())
+        printf(C_DIM "------------------------------------------------------------" C_RST "\n");
+    else
+        printf("------------------------------------------------------------\n");
     fflush(stdout);
 }
 
@@ -271,8 +305,12 @@ static void manejador_caos(int sig)
 {
     (void)sig;
     g_caos = 1;
-    printf("\n[BOX pid=%d] *** CAOS PLANETARIO *** Tiempo maximo (%d s) agotado. "
-           "Terminando todos los Meeseeks...\n", (int)getpid(), g_caos_seg);
+    if (usa_color())
+        printf("\n" C_BOLD C_RED "!!! CAOS PLANETARIO !!!" C_RST " [BOX pid=%d] Tiempo maximo (%d s) agotado.\nTerminando todos los Meeseeks...\n",
+               (int)getpid(), g_caos_seg);
+    else
+        printf("\n[BOX pid=%d] *** CAOS PLANETARIO *** Tiempo maximo (%d s) agotado. "
+               "Terminando todos los Meeseeks...\n", (int)getpid(), g_caos_seg);
     fflush(stdout);
     kill(0, SIGTERM); /* mata todo el grupo (Box + Meeseeks) */
     sleep(1);
@@ -309,11 +347,11 @@ static double duracion_aleatoria(void)
 static float pedir_dificultad(void)
 {
     char buf[64];
-    printf("  Dificultad: (1) ingresarla manual 0-100 | (2) suerte Meeseeks? [2]: ");
+    printf("  +- Dificultad: (1) manual 0-100 | (2) suerte Meeseeks? [2]: ");
     fflush(stdout);
     if (!fgets(buf, sizeof(buf), stdin)) return dificultad_aleatoria();
     if (buf[0] == '1') {
-        printf("  Ingrese dificultad (100=muy facil, 0=imposible): ");
+        printf("  +- Ingrese dificultad (100=muy facil, 0=imposible): ");
         fflush(stdout);
         if (!fgets(buf, sizeof(buf), stdin)) return dificultad_aleatoria();
         float d = atof(buf);
@@ -322,18 +360,18 @@ static float pedir_dificultad(void)
         return d;
     }
     float d = dificultad_aleatoria();
-    printf("  (suerte Meeseeks -> dificultad=%.2f)\n", d);
+    printf("  +- (suerte Meeseeks -> dificultad=%.2f)\n", d);
     return d;
 }
 
 static double pedir_duracion(void)
 {
     char buf[64];
-    printf("  Duracion simulacion: (1) manual 0.5-5 s | (2) aleatoria? [2]: ");
+    printf("  +- Duracion simulacion: (1) manual 0.5-5 s | (2) aleatoria? [2]: ");
     fflush(stdout);
     if (!fgets(buf, sizeof(buf), stdin)) return duracion_aleatoria();
     if (buf[0] == '1') {
-        printf("  Ingrese segundos (0.5-5.0): ");
+        printf("  +- Ingrese segundos (0.5-5.0): ");
         fflush(stdout);
         if (!fgets(buf, sizeof(buf), stdin)) return duracion_aleatoria();
         double d = atof(buf);
@@ -342,7 +380,7 @@ static double pedir_duracion(void)
         return d;
     }
     double d = duracion_aleatoria();
-    printf("  (duracion aleatoria -> %.2f s)\n", d);
+    printf("  +- (duracion aleatoria -> %.2f s)\n", d);
     return d;
 }
 
@@ -350,7 +388,7 @@ static double pedir_duracion(void)
 static void incrementar_contador(int N)
 {
     if (!g_shared) return;
-    sem_wait(&g_shared->mutex);
+    while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
     g_shared->total_meeseeks++;
     if (N > g_shared->nivel_max) g_shared->nivel_max = N;
     sem_post(&g_shared->mutex);
@@ -360,7 +398,7 @@ static int leer_contador_total(void)
 {
     int v = 0;
     if (!g_shared) return 0;
-    sem_wait(&g_shared->mutex);
+    while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
     v = g_shared->total_meeseeks;
     sem_post(&g_shared->mutex);
     return v;
@@ -526,6 +564,8 @@ static float aging_dificultad(float d_padre, int num_hijos, int nivel)
 }
 
 /* Crea 2 o 5 hijos en paralelo con pipes de resultado + control SIGTERM.
+ * Cada hijo recibe la solicitud por un pipe PRIVADO Box->hijo / padre->hijo
+ * (exigencia: ningun mensaje via variable global, solo contadores en shm).
  * Retorna 1 si algun subarbol tuvo exito (y llena res_out con el solver). */
 static int crear_hijos(char *solicitud, int tipo, float d_hija,
                        double dur_sim, int N, ResultadoPipe *res_out)
@@ -556,23 +596,41 @@ static int crear_hijos(char *solicitud, int tipo, float d_hija,
     int launched = 0;
 
     for (int k = 0; k < num; k++) {
-        int fd[2];
+        int fd[2], fsol[2];
         if (pipe(fd) < 0) { perror("pipe"); break; }
+        if (pipe(fsol) < 0) { perror("pipe sol"); close(fd[0]); close(fd[1]); break; }
         /* no-bloqueante para poder detectar exito temprano */
         fcntl(fd[0], F_SETFL, O_NONBLOCK);
         fflush(stdout);
         pid_t p = fork();
-        if (p < 0) { perror("fork"); close(fd[0]); close(fd[1]); break; }
+        if (p < 0) { perror("fork"); close(fd[0]); close(fd[1]); close(fsol[0]); close(fsol[1]); break; }
         if (p == 0) {
-            /* hijo k: cierra lectura, ejecuta rutina con N+1, i=k+1 */
-            close(fd[0]);
-            int r = rutina_meeseeks(solicitud, tipo, d_hija, dur_sim,
+            /* hijo k: recibe solicitud por pipe privado, ejecuta con N+1, i=k+1 */
+            close(fsol[1]); close(fd[0]);
+            char sol_buf[MAX_TEXTO] = "";
+            ssize_t acc = 0, n = 0;
+            while ((n = read(fsol[0], sol_buf + acc, sizeof(sol_buf) - 1 - acc)) > 0) {
+                acc += n;
+                if (acc >= (ssize_t)sizeof(sol_buf) - 1) break;
+            }
+            close(fsol[0]);
+            sol_buf[acc] = '\0';
+            if (acc == 0) { strncpy(sol_buf, solicitud, sizeof(sol_buf)-1); }
+            int r = rutina_meeseeks(sol_buf, tipo, d_hija, dur_sim,
                                    N+1, k+1, fd[1]);
             close(fd[1]);
             _exit(r ? 0 : 1);
         }
-        /* padre: cierra escritura, guarda lectura */
-        close(fd[1]);
+        /* padre: envia solicitud por pipe privado y cierra escritura (EOF) */
+        close(fsol[0]); close(fd[1]);
+        size_t por_escribir = strlen(solicitud);
+        size_t ya = 0;
+        while (ya < por_escribir) {
+            ssize_t w = write(fsol[1], solicitud + ya, por_escribir - ya);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            ya += (size_t)w;
+        }
+        close(fsol[1]);
         res_fds[launched] = fd[0];
         pids[launched] = p;
         launched++;
@@ -645,9 +703,13 @@ static int rutina_meeseeks(char *solicitud, int tipo, float dificultad,
 
     incrementar_contador(N);
 
-    /* Bienvenida exigida */
-    printf("Hi, I'm Mr. Meeseeks! Look at Meeeee. (pid=%d, ppid=%d, N=%d, i=%d)\n",
-           (int)getpid(), (int)getppid(), N, i);
+    /* Bienvenida exigida (texto exacto, con color si hay terminal) */
+    if (usa_color())
+        printf(C_BOLD C_GRN "Hi, I'm Mr. Meeseeks! Look at Meeeee." C_RST " (pid=%d, ppid=%d, N=%d, i=%d)\n",
+               (int)getpid(), (int)getppid(), N, i);
+    else
+        printf("Hi, I'm Mr. Meeseeks! Look at Meeeee. (pid=%d, ppid=%d, N=%d, i=%d)\n",
+               (int)getpid(), (int)getppid(), N, i);
     fflush(stdout);
 
     {
@@ -768,13 +830,26 @@ static void box_loop(void)
 {
     char linea[MAX_TEXTO];
 
-    mensaje_box("Caja Mr. Meeseeks iniciada. Mireme! (Look at meee!)");
-    printf("[BOX] Comandos: texto libre=A | 'calc: expr'=B | 'exec: prog args'=C | adios/bye/exit=salir\n");
-    printf("[BOX] Caos planetario en %d s. Tareas max %d.\n", g_caos_seg, MAX_TAREAS);
+    if (usa_color())
+        printf("\n" C_BOLD C_CYAN "============================================================\n"
+               "  MR. MEESEEKS BOX  -  Look at meee!\n"
+               "============================================================" C_RST "\n");
+    else
+        printf("\n============================================================\n"
+               "  MR. MEESEEKS BOX  -  Look at meee!\n"
+               "============================================================\n");
+    mensaje_box("Caja iniciada.");
+    printf("  Comandos : texto libre = A  |  'calc: expr' = B  |  'exec: prog args' = C\n");
+    printf("  Salir    : adios / bye / exit / quit\n");
+    printf("  Caos planetario en %d s  |  Tareas max %d\n", g_caos_seg, MAX_TAREAS);
     fflush(stdout);
 
     while (g_num_tareas < MAX_TAREAS) {
-        printf("\n[BOX pid=%d] Solicitud #%d > ", (int)getpid(), g_num_tareas+1);
+        linea_sep();
+        if (usa_color())
+            printf(C_BOLD "[BOX pid=%d] Solicitud #%d > " C_RST, (int)getpid(), g_num_tareas+1);
+        else
+            printf("[BOX pid=%d] Solicitud #%d > ", (int)getpid(), g_num_tareas+1);
         fflush(stdout);
         if (!fgets(linea, sizeof(linea), stdin)) { printf("\n"); break; }
         trim_nl(linea);
@@ -865,14 +940,16 @@ static void box_loop(void)
 
         char m1[700];
         if (exito_box)
-            snprintf(m1,sizeof(m1),"Tarea #%d COMPLETADA en %.2fs (real %.2fs, %d Meeseeks). Heroe pid=%d (N=%d,i=%d).",
+            snprintf(m1,sizeof(m1),"%s Tarea #%d COMPLETADA en %.2fs (real %.2fs, %d Meeseeks). Heroe pid=%d (N=%d,i=%d).",
+                     usa_color() ? "[OK]" : "[OK]",
                      g_num_tareas, t_total, t_real, usados,
                      (int)res.solver_pid, res.solver_N, res.solver_i);
         else
-            snprintf(m1,sizeof(m1),"Tarea #%d NO completada en %.2fs (real %.2fs, %d Meeseeks).",
+            snprintf(m1,sizeof(m1),"%s Tarea #%d NO completada en %.2fs (real %.2fs, %d Meeseeks).",
+                     usa_color() ? "[FALLO]" : "[FALLO]",
                      g_num_tareas, t_total, t_real, usados);
         mensaje_box(m1);
-        printf("[BOX] Control devuelto al Box. Listo para la siguiente solicitud.\n");
+        printf("  [BOX] Control devuelto al Box. Listo para la siguiente solicitud.\n");
         fflush(stdout);
     }
 
@@ -882,28 +959,46 @@ static void box_loop(void)
 /* Informe exigido al cerrar el Box */
 static void informe_final(void)
 {
-    printf("\n================ INFORME FINAL BOX =================\n");
-    printf("Tareas solicitadas : %d\n", g_num_tareas);
+    linea_sep();
+    if (usa_color())
+        printf(C_BOLD C_CYAN "================ INFORME FINAL BOX ================" C_RST "\n");
+    else
+        printf("================ INFORME FINAL BOX ================\n");
+    printf("  Tareas solicitadas : %d\n", g_num_tareas);
+    printf("  ----------------------------------------------------------------\n");
+    printf("  %-4s %-9s %-28s %-11s %-11s %-7s %s\n",
+           "#", "Tipo", "Solicitud", "t_total", "t_real", "Res", "Meeseeks/Heroe");
+    printf("  ----------------------------------------------------------------\n");
     int ok = 0;
     for (int k = 0; k < g_num_tareas; k++) {
         Reporte *r = &g_reportes[k];
         if (r->exito) ok++;
-        printf(" #%02d [%s] '%s' d=%.2f | total=%.2fs real=%.2fs | %s | meeseeks=%d",
-               k+1, nombre_tipo(r->tipo), r->solicitud, r->dificultad,
-               r->t_total, r->t_real, r->exito?"OK":"FALLO", r->num_meeseeks);
-        if (r->exito) printf(" | heroe pid=%d N=%d i=%d", (int)r->solver_pid, r->solver_N, r->solver_i);
+        char sol_corta[29];
+        snprintf(sol_corta, sizeof(sol_corta), "%.28s", r->solicitud);
+        const char *res_txt = r->exito ? "OK" : "FALLO";
+        if (usa_color() && r->exito)
+            res_txt = C_GRN "OK" C_RST;
+        else if (usa_color())
+            res_txt = C_RED "FALLO" C_RST;
+        printf("  %-4d %-9s %-28s %-11.2f %-11.2f %-7s x%d",
+               k+1, nombre_tipo(r->tipo), sol_corta,
+               r->t_total, r->t_real, res_txt, r->num_meeseeks);
+        if (r->exito) printf("  heroe pid=%d N=%d i=%d", (int)r->solver_pid, r->solver_N, r->solver_i);
         printf("\n");
     }
-    printf("Completadas: %d | No completadas: %d\n", ok, g_num_tareas - ok);
+    printf("  ----------------------------------------------------------------\n");
+    printf("  Completadas: %d  |  No completadas: %d\n", ok, g_num_tareas - ok);
     if (g_shared) {
-        sem_wait(&g_shared->mutex);
-        printf("Total Meeseeks creados: %d | Nivel maximo: %d\n",
+        while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
+        printf("  Total Meeseeks creados: %d  |  Nivel maximo: %d\n",
                g_shared->total_meeseeks, g_shared->nivel_max);
         sem_post(&g_shared->mutex);
     }
-    printf("====================================================\n");
-    printf("[BOX pid=%d] Gracias! Adios! (Box termina)\n", (int)getpid());
-    fflush(stdout);
+    if (usa_color())
+        printf(C_BOLD C_CYAN "====================================================" C_RST "\n");
+    else
+        printf("====================================================\n");
+    mensaje_box("Gracias! Adios! (Box termina)");
 }
 
 /* ======================================================================
