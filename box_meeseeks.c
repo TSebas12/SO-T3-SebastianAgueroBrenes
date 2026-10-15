@@ -133,6 +133,7 @@ typedef struct {
     sem_t mutex;            /* semaforo pshared para exclusion mutua */
     int   total_meeseeks;   /* total historico de Meeseeks creados   */
     int   nivel_max;        /* nivel N maximo alcanzado              */
+    int   tarea_actual;     /* Meeseeks creados en la tarea en curso  */
 } ContadoresShared;
 
 /* Resultado que viaja por pipe hijo -> padre (nunca por global). */
@@ -190,7 +191,10 @@ static double pedir_duracion(void);
 static double duracion_aleatoria(void);
 static float  dificultad_aleatoria(void);
 static void   incrementar_contador(int N);
-static int    leer_contador_total(void);
+static int    leer_contador_tarea(void);
+static void   iniciar_contador_tarea(void);
+static int    reservar_meeseeks(int solicitados);
+static void   actualizar_nivel_max(int N);
 
 /* Caso B: evaluador */
 static int evaluar_expresion(const char *expr, double *out, char *err, size_t errn);
@@ -200,7 +204,7 @@ static int ejecutar_externo(const char *cmdline, int *rc_out);
 
 /* Nucleo Meeseeks */
 static int  rutina_meeseeks(char *solicitud, int tipo, float dificultad,
-                            double dur_sim, int N, int i, int fd_res);
+                            double dur_sim, int N, int i, int fd_res, int ya_contado);
 static int  casoA_intentar(float dificultad);
 static float aging_dificultad(float d_padre, int num_hijos, int nivel);
 static int  crear_hijos(char *solicitud, int tipo, float d_hija,
@@ -390,18 +394,53 @@ static void incrementar_contador(int N)
     if (!g_shared) return;
     while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
     g_shared->total_meeseeks++;
+    g_shared->tarea_actual++;
     if (N > g_shared->nivel_max) g_shared->nivel_max = N;
     sem_post(&g_shared->mutex);
 }
 
-static int leer_contador_total(void)
+/* El Box la pone en 0 al iniciar cada tarea (con semaforo). */
+static void iniciar_contador_tarea(void)
+{
+    if (!g_shared) return;
+    while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
+    g_shared->tarea_actual = 0;
+    sem_post(&g_shared->mutex);
+}
+
+/* Reserva atomica de slots para hijos: evita que ramas en paralelo
+ * sobrepasen MAX_MESEEKS_TAREA por carrera. Ya suma a total y tarea. */
+static int reservar_meeseeks(int solicitados)
+{
+    if (!g_shared) return solicitados;
+    while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
+    int usados = g_shared->tarea_actual;
+    int libres = MAX_MESEEKS_TAREA - usados;
+    if (libres < 0) libres = 0;
+    int ok = solicitados < libres ? solicitados : libres;
+    g_shared->tarea_actual += ok;
+    g_shared->total_meeseeks += ok;
+    /* nivel max se actualiza en incrementar/rutina; aca no sabemos N aun */
+    sem_post(&g_shared->mutex);
+    return ok;
+}
+
+static int leer_contador_tarea(void)
 {
     int v = 0;
     if (!g_shared) return 0;
     while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
-    v = g_shared->total_meeseeks;
+    v = g_shared->tarea_actual;
     sem_post(&g_shared->mutex);
     return v;
+}
+
+static void actualizar_nivel_max(int N)
+{
+    if (!g_shared) return;
+    while (sem_wait(&g_shared->mutex) == -1 && errno == EINTR) ;
+    if (N > g_shared->nivel_max) g_shared->nivel_max = N;
+    sem_post(&g_shared->mutex);
 }
 
 /* ======================================================================
@@ -571,14 +610,11 @@ static int crear_hijos(char *solicitud, int tipo, float d_hija,
                        double dur_sim, int N, ResultadoPipe *res_out)
 {
     int num = (d_hija <= 45.0f) ? 5 : 2; /* segun enunciado: 0-45->5, 45-85->2 */
-    /* Contingencia: recortar si nos acercamos al tope por tarea */
-    int usados = leer_contador_total();
-    if (usados + num > MAX_MESEEKS_TAREA) {
-        num = MAX_MESEEKS_TAREA - usados;
-        if (num <= 0) {
-            mensaje_meeseeks("Tope MAX_MESEEKS alcanzado, no puedo crear mas ayuda. Fracaso esta rama.");
-            return 0;
-        }
+    /* Contingencia atomica: reserva slots para evitar carreras entre ramas */
+    num = reservar_meeseeks(num);
+    if (num <= 0) {
+        mensaje_meeseeks("Tope MAX_MESEEKS alcanzado, no puedo crear mas ayuda. Fracaso esta rama.");
+        return 0;
     }
     if (N + 1 > MAX_NIVEL) {
         mensaje_meeseeks("Tope MAX_NIVEL alcanzado, no ramifico mas. Fracaso esta rama.");
@@ -617,7 +653,7 @@ static int crear_hijos(char *solicitud, int tipo, float d_hija,
             sol_buf[acc] = '\0';
             if (acc == 0) { strncpy(sol_buf, solicitud, sizeof(sol_buf)-1); }
             int r = rutina_meeseeks(sol_buf, tipo, d_hija, dur_sim,
-                                   N+1, k+1, fd[1]);
+                                   N+1, k+1, fd[1], 1); /* 1=ya reservado, no recontar */
             close(fd[1]);
             _exit(r ? 0 : 1);
         }
@@ -695,13 +731,14 @@ static int crear_hijos(char *solicitud, int tipo, float d_hija,
  * Retorna 1 exito / 0 fracaso (tambien lo escribe por el pipe).
  * ==================================================================== */
 static int rutina_meeseeks(char *solicitud, int tipo, float dificultad,
-                           double dur_sim, int N, int i, int fd_res)
+                           double dur_sim, int N, int i, int fd_res, int ya_contado)
 {
     g_mi_pid = getpid(); g_mi_ppid = getppid(); g_mi_N = N; g_mi_i = i;
     signal(SIGTERM, manejador_meeseeks_term);
     srand((unsigned)(time(NULL) ^ (getpid()*2654435761u)));
 
-    incrementar_contador(N);
+    if (ya_contado) actualizar_nivel_max(N);
+    else incrementar_contador(N);
 
     /* Bienvenida exigida (texto exacto, con color si hay terminal) */
     if (usa_color())
@@ -870,7 +907,7 @@ static void box_loop(void)
         fcntl(pipe_res[0], F_SETFL, O_NONBLOCK);
 
         double t0 = ahora_seg();
-        int total_antes = leer_contador_total();
+        iniciar_contador_tarea();
 
         fflush(stdout);
         pid_t p = fork();
@@ -891,7 +928,7 @@ static void box_loop(void)
             sol[acc] = '\0';
             close(pipe_sol[0]);
             if (acc == 0) { strncpy(sol, linea, sizeof(sol)-1); sol[sizeof(sol)-1]='\0'; }
-            int r = rutina_meeseeks(sol, tipo, dificultad, dur_sim, 1, 1, pipe_res[1]);
+            int r = rutina_meeseeks(sol, tipo, dificultad, dur_sim, 1, 1, pipe_res[1], 0);
             close(pipe_res[1]);
             _exit(r ? 0 : 1);
         }
@@ -919,8 +956,7 @@ static void box_loop(void)
         }
         close(pipe_res[0]);
         double t1 = ahora_seg();
-        int total_desp = leer_contador_total();
-        int usados = total_desp - total_antes;
+        int usados = leer_contador_tarea();
 
         int exito_box = 0;
         if (nr == sizeof(res)) exito_box = res.exito;
